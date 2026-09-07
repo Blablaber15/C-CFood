@@ -15,6 +15,48 @@ except ImportError:
     GROUP_ID = os.environ["GROUP_ID"]
 bot = telebot.TeleBot(BOT_TOKEN)
 
+# --- НАСТРОЙКА ОБЯЗАТЕЛЬНЫХ ФОТО ДЛЯ ПУНКТОВ ---
+# True — бот потребует фото. False — пункт отмечается просто кликом.
+REQUIRES_PHOTO_OPEN = {
+    "menu": False,
+    "uniform": True,
+    "hands": False,
+    "workspace": True,
+    "fridge": True,
+    "ingredients": True,
+    "meat": True,
+    "sauces": True,
+    "tools": True,
+    "equipment": False
+}
+
+REQUIRES_PHOTO_WORK = {
+    "grammage": False,
+    "meat_control": False,
+    "speed": False,
+    "upsell": False,
+    "cleanliness": True,
+    "display_case": True,
+    "marking": True,
+    "idle_time": False
+}
+
+REQUIRES_PHOTO_FINISH = {
+    "leftovers": True,
+    "write_offs": True,
+    "meat_storage": True,
+    "containers": True,
+    "sauces_clean": True,
+    "tools_wash": True,
+    "disinfection": False,
+    "fridge_close": True,
+    "trash": True,
+    "cash_register": True,
+    "floor_clean": True,
+    "power_off": False,
+    "meat_consumption": False  # Для этого пункта используется текстовый ввод
+}
+
 # Раздельные словари для хранения выборов на каждом этапе
 user_selections = {
     "open": {},
@@ -22,9 +64,15 @@ user_selections = {
     "finish": {}
 }
 
-# Хранилище для текстовых данных (например, для Расхода мяса)
-user_inputs = {}
+# Хранилище сданных за сегодня отчетов для блокировки повторных кликов
+submitted_reports = {
+    "open": set(),
+    "work": set(),
+    "finish": set()
+}
 
+# Хранилище для текстовых данных и состояний сессии
+user_inputs = {}
 user_data = {}
 
 OPTIONS_open = {
@@ -64,500 +112,354 @@ OPTIONS_finish = {
     "cash_register": "Касса закрыта и сверена",
     "floor_clean": "Пол и рабочая зона убраны",
     "power_off": "Необходимое оборудование выключено",
-    "meat_consumption": "Расход мяса (план-факт)"  # Перенесено в конец смены
+    "meat_consumption": "Расход мяса (план-факт)"
 }
-
-
-# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ФОРМИРОВАНИЯ ТЕКСТА О ТЧЕТА ---
-
 def get_user_info_text(user_id, stage_title):
     info = user_data.get(user_id, {})
     name = info.get("name", "Не указано")
     date = info.get("date", "Не указана")
     shift = info.get("shift", "Не указана")
-    
-    return f"📌 **{stage_title}**\n\n👤 **Сотрудник:** {name}\n📅 **Дата:** {date}\n🔢 **Смена:** №{shift}"
+    return f"📌 **{stage_title}**\n\n👤 **Сотрудник:** {name}\n📅 **Дата:** {date}\n🔢 **Смена:** {shift}"
 
+def get_stages_keyboard(user_id):
+    markup = InlineKeyboardMarkup()
+    open_text = "🌅 Открытие смены (СДАНО)" if user_id in submitted_reports["open"] else "🌅 Открытие смены"
+    work_text = "☀️ Отчет в середине дня (СДАНО)" if user_id in submitted_reports["work"] else "☀️ Отчет в середине дня"
+    finish_text = "🌌 Закрытие смены (СДАНО)" if user_id in submitted_reports["finish"] else "🌌 Закрытие смены"
+    
+    markup.add(InlineKeyboardButton(text=open_text, callback_data="start_stage_open"))
+    markup.add(InlineKeyboardButton(text=work_text, callback_data="start_stage_work"))
+    markup.add(InlineKeyboardButton(text=finish_text, callback_data="start_stage_finish"))
+    return markup
 
 # --- СТАРТ И ВВОД ДАННЫХ ---
 
 @bot.message_handler(commands=["start"])
 def start(message):
+    bot.clear_step_handler_by_chat_id(message.chat.id)
+    
     markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     button = KeyboardButton("✅ Открыть смену")
     markup.add(button)
-
-    bot.send_message(
-        message.chat.id,
-        "✅ Доброе утро! Чтобы открыть смену, нажмите ниже ⬇️",
-        reply_markup=markup
-    )
-
+    bot.send_message(message.chat.id, "✅ Добрый день! Чтобы начать, нажмите кнопку ниже ⬇️", reply_markup=markup)
 
 @bot.message_handler(func=lambda message: message.text == "✅ Открыть смену")
 def open_shift(message):
-    markup = InlineKeyboardMarkup()
-    button = InlineKeyboardButton(text="Ваш чек-лист", callback_data="run_cheklist")
-    markup.add(button)
+    user_id = message.from_user.id
+    bot.send_message(message.chat.id, "Выберите чек-лист, который хотите заполнить:", reply_markup=get_stages_keyboard(user_id))
 
-    bot.send_message(
-        message.chat.id,
-        "Смена открыта! ✅ Нажмите кнопку ниже для заполнения данных:",
-        reply_markup=markup
-    )
-
-
-@bot.callback_query_handler(func=lambda call: call.data == "run_cheklist")
-def handle_cheklist(call):
+@bot.callback_query_handler(func=lambda call: call.data.startswith("start_stage_"))
+def handle_stage_selection(call):
+    stage = call.data.split("_")[2]  # Получаем open, work, или finish
+    user_id = call.from_user.id
+    
+    if user_id in submitted_reports[stage]:
+        bot.answer_callback_query(call.id, text="❌ Эта смена уже закрыта и отправлена!", show_alert=True)
+        return
+        
     bot.answer_callback_query(call.id)
-    msg = bot.send_message(
-        call.message.chat.id,
-        "📅 **Шаг 1/3:** Введите дату смены в формате **ДД.ММ.ГГГГ** (например, 03.09.2026):",
-        parse_mode="Markdown"
-    )
-    bot.register_next_step_handler(msg, process_date_step)
-
-
+    
+    if user_id not in user_inputs:
+        user_inputs[user_id] = {}
+    user_inputs[user_id]["target_stage"] = stage
+    
+    if user_id in user_data and "name" in user_data[user_id] and "date" in user_data[user_id]:
+        launch_checklist_instantly(call.message.chat.id, user_id, stage)
+    else:
+        msg = bot.send_message(call.message.chat.id, "📅 **Шаг 1/3:** Введите дату в формате **ДД.ММ.ГГГГ** (например, 07.09.2026):", parse_mode="Markdown")
+        bot.register_next_step_handler(msg, process_date_step)
 def process_date_step(message):
+    if message.text == "/start":
+        start(message)
+        return
+        
     user_id = message.from_user.id
     date_pattern = r"^\d{2}\.\d{2}\.\d{4}$"
-
     if not message.text or not re.match(date_pattern, message.text):
-        msg = bot.send_message(
-            message.chat.id,
-            "❌ **Неверный формат даты!** Пожалуйста, введите дату строго в формате **ДД.ММ.ГГГГ** (например, 25.10.2026):",
-            parse_mode="Markdown"
-        )
+        msg = bot.send_message(message.chat.id, "❌ **Неверный формат даты!** Пожалуйста, введите дату строго в формате **ДД.ММ.ГГГГ**:", parse_mode="Markdown")
         bot.register_next_step_handler(msg, process_date_step)
         return
-
+    
     user_data[user_id] = {"date": message.text}
-
-    msg = bot.send_message(
-        message.chat.id,
-        "🔢 **Шаг 2/3:** Введите **номер смены** (только число, например: 1 или 2):",
-        parse_mode="Markdown"
-    )
+    msg = bot.send_message(message.chat.id, "🔢 **Шаг 2/3:** Введите название или номер смены (например: 1, Вечер, Смена А):", parse_mode="Markdown")
     bot.register_next_step_handler(msg, process_shift_step)
 
-
 def process_shift_step(message):
+    if message.text == "/start":
+        start(message)
+        return
+        
     user_id = message.from_user.id
-
-    if not message.text or not message.text.isdigit():
-        msg = bot.send_message(
-            message.chat.id,
-            "❌ **Ошибка!** Нужно ввести **только число**. Пожалуйста, укажите номер смены цифрами:",
-            parse_mode="Markdown"
-        )
+    if not message.text:
+        msg = bot.send_message(message.chat.id, "❌ **Ошибка!** Введите название или номер смены:", parse_mode="Markdown")
         bot.register_next_step_handler(msg, process_shift_step)
         return
-
     if user_id in user_data:
         user_data[user_id]["shift"] = message.text
-
-    msg = bot.send_message(
-        message.chat.id,
-        "👤 **Шаг 3/3:** Введите **Имя и Фамилию** сотрудника (текст):",
-        parse_mode="Markdown"
-    )
+    msg = bot.send_message(message.chat.id, "👤 **Шаг 3/3:** Введите **Имя и Фамилию** сотрудника (текст):", parse_mode="Markdown")
     bot.register_next_step_handler(msg, process_name_step)
 
-
 def process_name_step(message):
+    if message.text == "/start":
+        start(message)
+        return
+        
     user_id = message.from_user.id
-
     if message.content_type != 'text':
-        msg = bot.send_message(
-            message.chat.id,
-            "❌ **Ошибка!** Отправьте имя обычным текстом:",
-            parse_mode="Markdown"
-        )
+        msg = bot.send_message(message.chat.id, "❌ **Ошибка!** Отправьте имя обычным текстом:", parse_mode="Markdown")
         bot.register_next_step_handler(msg, process_name_step)
         return
-
+        
     if user_id in user_data:
         user_data[user_id]["name"] = message.text
 
+    stage = user_inputs.get(user_id, {}).get("target_stage", "open")
+    launch_checklist_instantly(message.chat.id, user_id, stage)
+
+def launch_checklist_instantly(chat_id, user_id, stage):
+    if stage == "open":
+        reply_markup = get_checkbox_keyboard(user_id, "open", OPTIONS_open, "toggle_open:", "finish_open")
+        title = "Открытие смены"
+    elif stage == "work":
+        reply_markup = get_checkbox_keyboard(user_id, "work", OPTIONS_work, "toggle_work:", "finish_work")
+        title = "Отчет в середине дня"
+    else:
+        reply_markup = get_checkbox_keyboard(user_id, "finish", OPTIONS_finish, "toggle_finish:", "finish_finish")
+        title = "Закрытие смены"
+
     bot.send_message(
-        message.chat.id,
-        f"📋 **Данные приняты!**\n"
-        f"Сотрудник: {user_data[user_id]['name']}\n"
-        f"Дата: {user_data[user_id]['date']}\n"
-        f"Смена: №{user_data[user_id]['shift']}\n\n"
-        f"Теперь отметьте галочками выполненные пункты:",
-        reply_markup=get_checkbox_keyboard(user_id, "open", OPTIONS_open, "toggle_open:", "finish_open"),
+        chat_id,
+        f"📋 **Чек-лист: {title}**\nСотрудник: {user_data[user_id]['name']}\nДата: {user_data[user_id]['date']}\nСмена: {user_data[user_id]['shift']}\n\nОтметьте выполненные пункты:",
+        reply_markup=reply_markup,
         parse_mode="Markdown"
     )
-
-
-# --- ГЕНЕРАТОР КЛАВИАТУР ДЛЯ ЧЕК-ЛИСТОВ ---
 
 def get_checkbox_keyboard(user_id, stage, options, toggle_prefix, finish_callback):
     selected = user_selections[stage].get(user_id, set())
     markup = InlineKeyboardMarkup()
-
     for item_id, label in options.items():
         status_emoji = "✅" if item_id in selected else "⬜️"
         
-        # Динамическая подстановка введенных пользователем данных
         if item_id == "meat_consumption" and user_id in user_inputs and "meat_consumption" in user_inputs[user_id]:
             button_text = f"{status_emoji} {label}: {user_inputs[user_id]['meat_consumption']}"
         else:
             button_text = f"{status_emoji} {label}"
-
+            
         callback_data = f"{toggle_prefix}{item_id}"
         markup.add(InlineKeyboardButton(text=button_text, callback_data=callback_data))
-
+        
     completed_count = len(selected)
     total_count = len(options)
     finish_text = f"📥 Завершить отчет ({completed_count}/{total_count})"
-
     markup.add(InlineKeyboardButton(text=finish_text, callback_data=finish_callback))
     return markup
 
-
 # --- 1. ЭТАП: ОТКРЫТИЕ СМЕНЫ ---
-
 @bot.callback_query_handler(func=lambda call: call.data.startswith("toggle_open:"))
 def process_checkbox_open(call):
     user_id = call.from_user.id
     item_id = call.data.split(":")[1]
-
     if user_id not in user_selections["open"]:
         user_selections["open"][user_id] = set()
-
+        
     if item_id in user_selections["open"][user_id]:
         user_selections["open"][user_id].remove(item_id)
+        bot.answer_callback_query(call.id)
+        update_keyboard_safe(call, user_id, "open", OPTIONS_open, "toggle_open:", "finish_open")
     else:
-        user_selections["open"][user_id].add(item_id)
-
-    bot.answer_callback_query(call.id)
-    
-    try:
-        bot.edit_message_reply_markup(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            reply_markup=get_checkbox_keyboard(user_id, "open", OPTIONS_open, "toggle_open:", "finish_open")
-        )
-    except ApiTelegramException as e:
-        if "message is not modified" not in e.description:
-            raise e
-
-
-@bot.callback_query_handler(func=lambda call: call.data == "finish_open")
-def process_finish_open(call):
-    user_id = call.from_user.id
-    selected = user_selections["open"].get(user_id, set())
-
-    if len(selected) < len(OPTIONS_open):
-        bot.answer_callback_query(
-            call.id,
-            text=f"Вы выполнили не все пункты! Заполнено только {len(selected)} из {len(OPTIONS_open)}.",
-            show_alert=True
-        )
-        return
-
-    bot.answer_callback_query(call.id)
-    bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=None)
-
-    msg = bot.send_message(
-        call.message.chat.id,
-        "🎉 Отлично! Все пункты чек-листа выполнены.\n\n"
-        "📸 Теперь, пожалуйста, **отправьте фотоотчет** (одну фотографию вашего рабочего места):",
-        parse_mode="Markdown"
-    )
-    bot.register_next_step_handler(msg, save_photo_report_open)
-
-
-def save_photo_report_open(message):
-    user_id = message.from_user.id
-
-    if message.content_type == "photo":
-        # Пересылка фотографии в целевую группу
-        if GROUP_ID:
-            photo_id = message.photo[-1].file_id
-            caption = get_user_info_text(user_id, "Открытие смены 🟢")
-            try:
-                bot.send_photo(GROUP_ID, photo_id, caption=caption, parse_mode="Markdown")
-            except Exception as e:
-                print(f"❌ Ошибка отправки фото в группу (Открытие): {e}")
-
-        user_selections["open"][user_id] = set()
-
-        markup = InlineKeyboardMarkup()
-        button = InlineKeyboardButton(text="📋 Отчет в середине дня", callback_data="run_work_checklist")
-        markup.add(button)
-
-        bot.send_message(
-            message.chat.id,
-            "✅ Фотоотчет открытия смены принят!\n\n"
-            "Смена успешно зарегистрирована.\n"
-            "Когда будете готовы сдать отчет в середине дня, нажмите кнопку ниже:",
-            reply_markup=markup
-        )
-    else:
-        msg = bot.send_message(
-            message.chat.id,
-            "❌ Ошибка. Нужна именно **фотография**. Пожалуйста, отправьте фото вашего рабочего места еще раз:",
-            parse_mode="Markdown"
-        )
-        bot.register_next_step_handler(msg, save_photo_report_open)
-
-
-# --- 2. ЭТАП: СЕРЕДИНА ДНЯ ---
-
-@bot.callback_query_handler(func=lambda call: call.data == "run_work_checklist")
-def run_work_checklist(call):
-    bot.answer_callback_query(call.id)
-    bot.send_message(
-        call.message.chat.id,
-        "📋 **Чек-лист середины дня.** Отметьте выполненные пункты:",
-        reply_markup=get_checkbox_keyboard(call.from_user.id, "work", OPTIONS_work, "toggle_work:", "finish_work"),
-        parse_mode="Markdown"
-    )
-
-
+        if REQUIRES_PHOTO_OPEN.get(item_id, False):
+            bot.answer_callback_query(call.id)
+            msg = bot.send_message(
+                call.message.chat.id, 
+                f"📸 Для пункта **«{OPTIONS_open[item_id]}»** необходимо отправить фото-подтверждение:", 
+                parse_mode="Markdown"
+            )
+            bot.register_next_step_handler(msg, save_photo_and_toggle, "open", item_id, OPTIONS_open, "toggle_open:", "finish_open", call.message.message_id)
+        else:
+            user_selections["open"][user_id].add(item_id)
+            bot.answer_callback_query(call.id)
+            update_keyboard_safe(call, user_id, "open", OPTIONS_open, "toggle_open:", "finish_open")
+# --- 2. ЭТАП: ОТЧЕТ В СЕРЕДИНЕ ДНЯ ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("toggle_work:"))
 def process_checkbox_work(call):
     user_id = call.from_user.id
     item_id = call.data.split(":")[1]
-
     if user_id not in user_selections["work"]:
         user_selections["work"][user_id] = set()
-
     if item_id in user_selections["work"][user_id]:
         user_selections["work"][user_id].remove(item_id)
+        bot.answer_callback_query(call.id)
+        update_keyboard_safe(call, user_id, "work", OPTIONS_work, "toggle_work:", "finish_work")
     else:
-        user_selections["work"][user_id].add(item_id)
-
-    bot.answer_callback_query(call.id)
-    
-    try:
-        bot.edit_message_reply_markup(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            reply_markup=get_checkbox_keyboard(user_id, "work", OPTIONS_work, "toggle_work:", "finish_work")
-        )
-    except ApiTelegramException as e:
-        if "message is not modified" not in e.description:
-            raise e
-
-
-@bot.callback_query_handler(func=lambda call: call.data == "finish_work")
-def process_finish_work(call):
-    user_id = call.from_user.id
-    selected = user_selections["work"].get(user_id, set())
-
-    if len(selected) < len(OPTIONS_work):
-        bot.answer_callback_query(
-            call.id,
-            text=f"Вы выполнили не все пункты! Заполнено только {len(selected)} из {len(OPTIONS_work)}.",
-            show_alert=True
-        )
-        return
-
-    bot.answer_callback_query(call.id)
-    bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=None)
-
-    msg = bot.send_message(
-        call.message.chat.id,
-        "🎉 Отлично! Все пункты чек-листа выполнены.\n\n"
-        "📸 Теперь, пожалуйста, **отправьте фотоотчет** (одну фотографию вашего рабочего места):",
-        parse_mode="Markdown"
-    )
-    bot.register_next_step_handler(msg, save_photo_report_work)
-
-
-def save_photo_report_work(message):
-    user_id = message.from_user.id
-
-    if message.content_type == "photo":
-        # Пересылка фотографии в целевую группу
-        if GROUP_ID:
-            photo_id = message.photo[-1].file_id
-            caption = get_user_info_text(user_id, "Середина дня 🟡")
-            try:
-                bot.send_photo(int(GROUP_ID), photo_id, caption=caption, parse_mode="Markdown")
-            except Exception as e:
-                print(f"❌ Ошибка отправки фото в группу (Середина): {e}")
-
-        user_selections["work"][user_id] = set()
-
-        markup = InlineKeyboardMarkup()
-        button = InlineKeyboardButton(text="🔒 Закрыть смену", callback_data="run_finish_checklist")
-        markup.add(button)
-
-        bot.send_message(
-            message.chat.id,
-            "✅ Фотоотчет середины дня принят!\n\n"
-            "Отчет успешно зарегистрирован.\n"
-            "Когда будете готовы закрыть смену, нажмите кнопку ниже:",
-            reply_markup=markup
-        )
-    else:
-        msg = bot.send_message(
-            message.chat.id,
-            "❌ Ошибка. Нужна именно **фотография**. Пожалуйста, отправьте фото вашего рабочего места еще раз:",
-            parse_mode="Markdown"
-        )
-        bot.register_next_step_handler(msg, save_photo_report_work)
-
+        if REQUIRES_PHOTO_WORK.get(item_id, False):
+            bot.answer_callback_query(call.id)
+            msg = bot.send_message(
+                call.message.chat.id, 
+                f"📸 Для пункта **«{OPTIONS_work[item_id]}»** необходимо отправить фото-подтверждение:", 
+                parse_mode="Markdown"
+            )
+            bot.register_next_step_handler(msg, save_photo_and_toggle, "work", item_id, OPTIONS_work, "toggle_work:", "finish_work", call.message.message_id)
+        else:
+            user_selections["work"][user_id].add(item_id)
+            bot.answer_callback_query(call.id)
+            update_keyboard_safe(call, user_id, "work", OPTIONS_work, "toggle_work:", "finish_work")
 
 # --- 3. ЭТАП: ЗАКРЫТИЕ СМЕНЫ ---
-
-@bot.callback_query_handler(func=lambda call: call.data == "run_finish_checklist")
-def run_finish_checklist(call):
-    bot.answer_callback_query(call.id)
-    bot.send_message(
-        call.message.chat.id,
-        "🔒 **Чек-лист закрытия смены.** Отметьте выполненные пункты:",
-        reply_markup=get_checkbox_keyboard(call.from_user.id, "finish", OPTIONS_finish, "toggle_finish:", "finish_finish"),
-        parse_mode="Markdown"
-    )
-
-
 @bot.callback_query_handler(func=lambda call: call.data.startswith("toggle_finish:"))
 def process_checkbox_finish(call):
     user_id = call.from_user.id
     item_id = call.data.split(":")[1]
-
     if user_id not in user_selections["finish"]:
         user_selections["finish"][user_id] = set()
-
-    # Перехват клика по пункту Расход мяса (в конце смены)
-    if item_id == "meat_consumption":
-        bot.answer_callback_query(call.id)
-        msg = bot.send_message(
-            call.message.chat.id,
-            "🥩 Введите **Расход мяса (план-факт)** текстом\n(например: *10 кг / 9.5 кг* или *15/14*):",
-            parse_mode="Markdown"
-        )
-        bot.register_next_step_handler(msg, process_meat_input, call.message.message_id)
-        return
-
+        
     if item_id in user_selections["finish"][user_id]:
+        if item_id == "meat_consumption":
+            if user_id in user_inputs and "meat_consumption" in user_inputs[user_id]:
+                del user_inputs[user_id]["meat_consumption"]
         user_selections["finish"][user_id].remove(item_id)
+        bot.answer_callback_query(call.id)
+        update_keyboard_safe(call, user_id, "finish", OPTIONS_finish, "toggle_finish:", "finish_finish")
     else:
-        user_selections["finish"][user_id].add(item_id)
+        if item_id == "meat_consumption":
+            bot.answer_callback_query(call.id)
+            msg = bot.send_message(
+                call.message.chat.id, 
+                "🥩 Введите данные по **расходу мяса (план-факт)** текстом или числами:", 
+                parse_mode="Markdown"
+            )
+            bot.register_next_step_handler(msg, save_meat_input, call.message.message_id)
+        elif REQUIRES_PHOTO_FINISH.get(item_id, False):
+            bot.answer_callback_query(call.id)
+            msg = bot.send_message(
+                call.message.chat.id, 
+                f"📸 Для пункта **«{OPTIONS_finish[item_id]}»** необходимо отправить фото-подтверждение:", 
+                parse_mode="Markdown"
+            )
+            bot.register_next_step_handler(msg, save_photo_and_toggle, "finish", item_id, OPTIONS_finish, "toggle_finish:", "finish_finish", call.message.message_id)
+        else:
+            user_selections["finish"][user_id].add(item_id)
+            bot.answer_callback_query(call.id)
+            update_keyboard_safe(call, user_id, "finish", OPTIONS_finish, "toggle_finish:", "finish_finish")
 
-    bot.answer_callback_query(call.id)
-    
-    try:
-        bot.edit_message_reply_markup(
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            reply_markup=get_checkbox_keyboard(user_id, "finish", OPTIONS_finish, "toggle_finish:", "finish_finish")
-        )
-    except ApiTelegramException as e:
-        if "message is not modified" not in e.description:
-            raise e
-
-
-# Функция приема ввода данных для Расхода мяса при закрытии смены
-def process_meat_input(message, checklist_msg_id):
-    user_id = message.from_user.id
-
-    if not message.text:
-        msg = bot.send_message(
-            message.chat.id,
-            "❌ **Ошибка!** Отправьте значения текстом (например: 10/9.5):",
-            parse_mode="Markdown"
-        )
-        bot.register_next_step_handler(msg, process_meat_input, checklist_msg_id)
+# --- ВВОД ТЕКСТА ДЛЯ РАСХОДА МЯСА ---
+def save_meat_input(message, menu_message_id):
+    if message.text == "/start":
+        start(message)
         return
-
-    # Сохраняем значение пользователя
+        
+    user_id = message.from_user.id
+    if not message.text:
+        msg = bot.send_message(message.chat.id, "❌ **Ошибка!** Отправьте данные текстом или цифрами:")
+        bot.register_next_step_handler(msg, save_meat_input, menu_message_id)
+        return
+        
     if user_id not in user_inputs:
         user_inputs[user_id] = {}
     user_inputs[user_id]["meat_consumption"] = message.text
-
-    # Проставляем галочку в чек-листе закрытия смены
+    
     if user_id not in user_selections["finish"]:
         user_selections["finish"][user_id] = set()
     user_selections["finish"][user_id].add("meat_consumption")
+    
+    bot.send_message(message.chat.id, "✅ Данные по расходу мяса успешно записаны!")
+    
+    # Отправляем НОВОЕ меню чек-листа взамен сломанного edit_message
+    launch_checklist_instantly(message.chat.id, user_id, "finish")
 
-    bot.send_message(
-        message.chat.id,
-        f"✅ Значение *«{message.text}»* сохранено!",
-        parse_mode="Markdown"
-    )
+# --- ИСПРАВЛЕННЫЙ ОБРАБОТЧИК ФОТО-ПОДТВЕРЖДЕНИЙ ---
+def save_photo_and_toggle(message, stage, item_id, options, toggle_prefix, finish_callback, menu_message_id):
+    if message.text == "/start":
+        start(message)
+        return
+        
+    user_id = message.from_user.id
+    if message.content_type != 'photo':
+        msg = bot.send_message(message.chat.id, "❌ **Ошибка!** Нужно отправить именно **фотографию**. Попробуйте еще раз:", parse_mode="Markdown")
+        bot.register_next_step_handler(msg, save_photo_and_toggle, stage, item_id, options, toggle_prefix, finish_callback, menu_message_id)
+        return
+        
+    photo_id = message.photo[-1].file_id
+    stage_titles = {"open": "Открытие смены", "work": "Середина дня", "finish": "Закрытие смены"}
+    info_text = get_user_info_text(user_id, stage_titles.get(stage, "Отчет"))
+    caption_text = f"{info_text}\n\n📷 **Фото-подтверждение для пункта:**\n«{options[item_id]}»"
+    
+    try:
+        bot.send_photo(chat_id=GROUP_ID, photo=photo_id, caption=caption_text, parse_mode="Markdown")
+    except Exception as e:
+        print(f"Ошибка отправки фото: {e}")
+        
+    if user_id not in user_selections[stage]:
+        user_selections[stage][user_id] = set()
+    user_selections[stage][user_id].add(item_id)
+    
+    bot.send_message(message.chat.id, f"✅ Фото для пункта «{options[item_id]}» принято!")
+    
+    # ИСПРАВЛЕНО: Вместо edit_message принудительно отправляем НОВОЕ меню с галочками
+    launch_checklist_instantly(message.chat.id, user_id, stage)
 
-    # Обновляем клавиатуру у сообщения с чек-листом закрытия смены
+# --- ОБРАБОТЧИКИ ЗАВЕРШЕНИЯ ОТЧЕТОВ ---
+@bot.callback_query_handler(func=lambda call: call.data == "finish_open")
+def finish_open_report(call):
+    user_id = call.from_user.id
+    selected = user_selections["open"].get(user_id, set())
+    info_text = get_user_info_text(user_id, "Отчет по открытию смены")
+    report_lines = [f"{'✅' if i in selected else '❌'} {l}" for i, l in OPTIONS_open.items()]
+    full_report = f"{info_text}\n\n" + "\n".join(report_lines)
+    try:
+        bot.send_message(chat_id=GROUP_ID, text=full_report, parse_mode="Markdown")
+        submitted_reports["open"].add(user_id)
+        bot.answer_callback_query(call.id, text="🚀 Отчет по открытию смены отправлен!", show_alert=True)
+        bot.send_message(call.message.chat.id, "✨ Отчет успешно отправлен руководству! Выберите следующий чек-лист для заполнения:", reply_markup=get_stages_keyboard(user_id))
+        user_selections["open"][user_id] = set()
+    except Exception as e:
+        bot.answer_callback_query(call.id, text="⚠️ Ошибка отправки в группу.")
+
+@bot.callback_query_handler(func=lambda call: call.data == "finish_work")
+def finish_work_report(call):
+    user_id = call.from_user.id
+    selected = user_selections["work"].get(user_id, set())
+    info_text = get_user_info_text(user_id, "Отчет за середину дня")
+    report_lines = [f"{'✅' if i in selected else '❌'} {l}" for i, l in OPTIONS_work.items()]
+    full_report = f"{info_text}\n\n" + "\n".join(report_lines)
+    try:
+        bot.send_message(chat_id=GROUP_ID, text=full_report, parse_mode="Markdown")
+        submitted_reports["work"].add(user_id)
+        bot.answer_callback_query(call.id, text="🚀 Дневной отчет успешно отправлен!", show_alert=True)
+        bot.send_message(call.message.chat.id, "✨ Отчет успешно отправлен руководству! Выберите следующий чек-лист для заполнения:", reply_markup=get_stages_keyboard(user_id))
+        user_selections["work"][user_id] = set()
+    except Exception as e:
+        bot.answer_callback_query(call.id, text="⚠️ Ошибка отправки.")
+
+@bot.callback_query_handler(func=lambda call: call.data == "finish_finish")
+def finish_final_report(call):
+    user_id = call.from_user.id
+    selected = user_selections["finish"].get(user_id, set())
+    info_text = get_user_info_text(user_id, "Отчет по закрытию смены")
+    report_lines = []
+    for item_id, label in OPTIONS_finish.items():
+        status = "✅" if item_id in selected else "❌"
+        if item_id == "meat_consumption" and user_id in user_inputs and "meat_consumption" in user_inputs[user_id]:
+            report_lines.append(f"{status} {label}: {user_inputs[user_id]['meat_consumption']}")
+        else:
+            report_lines.append(f"{status} {label}")
+    full_report = f"{info_text}\n\n" + "\n".join(report_lines)
+    try:
+        bot.send_message(chat_id=GROUP_ID, text=full_report, parse_mode="Markdown")
+        submitted_reports["finish"].add(user_id)
+        bot.answer_callback_query(call.id, text="🚀 Отчет по закрытию отправлен!", show_alert=True)
+        bot.send_message(call.message.chat.id, "✨ Отчет успешно отправлен руководству! Выберите следующий чек-лист для заполнения:", reply_markup=get_stages_keyboard(user_id))
+        user_selections["finish"][user_id] = set()
+    except Exception as e:
+        bot.answer_callback_query(call.id, text="⚠️ Ошибка отправки.")
+
+def update_keyboard_safe(call, user_id, stage, options, toggle_prefix, finish_callback):
     try:
         bot.edit_message_reply_markup(
-            chat_id=message.chat.id,
-            message_id=checklist_msg_id,
-            reply_markup=get_checkbox_keyboard(user_id, "finish", OPTIONS_finish, "toggle_finish:", "finish_finish")
+            chat_id=call.message.chat.id, 
+            message_id=call.message.message_id, 
+            reply_markup=get_checkbox_keyboard(user_id, stage, options, toggle_prefix, finish_callback)
         )
     except ApiTelegramException:
         pass
 
-
-@bot.callback_query_handler(func=lambda call: call.data == "finish_finish")
-def process_finish_finish(call):
-    user_id = call.from_user.id
-    selected = user_selections["finish"].get(user_id, set())
-
-    if len(selected) < len(OPTIONS_finish):
-        bot.answer_callback_query(
-            call.id,
-            text=f"Вы выполнили не все пункты! Заполнено только {len(selected)} из {len(OPTIONS_finish)}.",
-            show_alert=True
-        )
-        return
-
-    bot.answer_callback_query(call.id)
-    bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=None)
-
-    msg = bot.send_message(
-        call.message.chat.id,
-        "🎉 Отлично! Все пункты чек-листа выполнены.\n\n"
-        "📸 Теперь, пожалуйста, **отправьте фотоотчет** (одну фотографию вашего рабочего места):",
-        parse_mode="Markdown"
-    )
-    bot.register_next_step_handler(msg, save_photo_report_finish)
-
-
-def save_photo_report_finish(message):
-    user_id = message.from_user.id
-
-    if message.content_type == "photo":
-        # Пересылка фотографии в целевую группу
-        if GROUP_ID:
-            photo_id = message.photo[-1].file_id
-            caption = get_user_info_text(user_id, "Закрытие смены 🔴")
-            
-            meat_val = user_inputs.get(user_id, {}).get("meat_consumption")
-            if meat_val:
-                caption += f"\n🥩 **Расход мяса (план-факт):** {meat_val}"
-
-            try:
-                bot.send_photo(int(GROUP_ID), photo_id, caption=caption, parse_mode="Markdown")
-            except Exception as e:
-                print(f"❌ Ошибка отправки фото в группу (Закрытие): {e}")
-
-        # Очищаем временные данные пользователя по окончании смены
-        user_selections["finish"][user_id] = set()
-        if user_id in user_inputs:
-            del user_inputs[user_id]
-        if user_id in user_data:
-            del user_data[user_id]
-
-        bot.send_message(
-            message.chat.id,
-            "✅ Финальный фотоотчет принят!\n\n"
-            "🔒 **Смена успешно закрыта.**\n"
-            "Все отчеты зарегистрированы. Хорошего дня!",
-            parse_mode="Markdown"
-        )
-    else:
-        msg = bot.send_message(
-            message.chat.id,
-            "❌ Ошибка. Нужна именно **фотография**. Пожалуйста, отправьте фото вашего рабочего места еще раз:",
-            parse_mode="Markdown"
-        )
-        bot.register_next_step_handler(msg, save_photo_report_finish)
-
-
-bot.polling(none_stop=True)
+bot.polling(non_stop=True)
