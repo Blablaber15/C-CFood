@@ -10,7 +10,12 @@ try:
     import config
     BOT_TOKEN = config.BOT_TOKEN
     GROUP_ID = config.GROUP_ID
-    ADMIN_USER_IDS = config.ADMIN_USER_IDS
+    admin_user_id = os.getenv("ADMIN_USER_ID")
+    ADMIN_USER_IDS = {
+        int(admin_user_id)
+        if admin_user_id
+        else config.ADMIN_USER_ID
+    } if admin_user_id or config.ADMIN_USER_ID else set()
 except ImportError:
     BOT_TOKEN = os.environ["BOT_TOKEN"]
     GROUP_ID = os.environ["GROUP_ID"]
