@@ -71,6 +71,16 @@ submitted_reports = {
     "finish": set()
 }
 
+# Пользователи, которым разрешено тестировать этапы в любом порядке.
+godmode_users = set()
+
+# Следующий отчет можно открыть только после завершения предыдущих этапов.
+STAGE_PREREQUISITES = {
+    "open": (),
+    "work": ("open",),
+    "finish": ("open", "work")
+}
+
 # Хранилище для текстовых данных и состояний сессии
 user_inputs = {}
 user_data = {}
@@ -143,6 +153,44 @@ def start(message):
     markup.add(button)
     bot.send_message(message.chat.id, "✅ Добрый день! Чтобы начать, нажмите кнопку ниже ⬇️", reply_markup=markup)
 
+@bot.message_handler(commands=["reset_reports"])
+def reset_reports(message):
+    user_id = message.from_user.id
+    for stage in submitted_reports:
+        submitted_reports[stage].discard(user_id)
+        user_selections[stage].pop(user_id, None)
+    user_inputs.pop(user_id, None)
+    user_data.pop(user_id, None)
+    bot.send_message(message.chat.id, "♻️ Ваши отчеты сброшены. Теперь можно начать с открытия смены.")
+
+@bot.message_handler(commands=["test_evening"])
+def test_evening(message):
+    user_id = message.from_user.id
+    submitted_reports["open"].add(user_id)
+    submitted_reports["work"].add(user_id)
+    submitted_reports["finish"].discard(user_id)
+    bot.send_message(
+        message.chat.id,
+        "🧪 Тестовый режим: открытие и дневной отчет пропущены. Выберите вечернюю смену.",
+        reply_markup=get_stages_keyboard(user_id)
+    )
+
+@bot.message_handler(commands=["godmode"])
+def enable_godmode(message):
+    godmode_users.add(message.from_user.id)
+    bot.send_message(
+        message.chat.id,
+        "🛠 Godmode включен. Теперь можно проверять любую смену в любом порядке."
+    )
+
+@bot.message_handler(commands=["godmodeexit"])
+def disable_godmode(message):
+    godmode_users.discard(message.from_user.id)
+    bot.send_message(
+        message.chat.id,
+        "🔒 Godmode выключен. Проверка порядка смен снова включена."
+    )
+
 @bot.message_handler(func=lambda message: message.text == "✅ Открыть смену")
 def open_shift(message):
     user_id = message.from_user.id
@@ -155,6 +203,24 @@ def handle_stage_selection(call):
     
     if user_id in submitted_reports[stage]:
         bot.answer_callback_query(call.id, text="❌ Эта смена уже закрыта и отправлена!", show_alert=True)
+        return
+
+    missing_stages = [] if user_id in godmode_users else [
+        required_stage
+        for required_stage in STAGE_PREREQUISITES[stage]
+        if user_id not in submitted_reports[required_stage]
+    ]
+    if missing_stages:
+        stage_names = {
+            "open": "открытие смены",
+            "work": "отчет в середине дня"
+        }
+        missing_text = " и ".join(stage_names[item] for item in missing_stages)
+        bot.answer_callback_query(
+            call.id,
+            text=f"Сначала завершите: {missing_text}.",
+            show_alert=True
+        )
         return
         
     bot.answer_callback_query(call.id)
@@ -447,7 +513,13 @@ def finish_final_report(call):
         bot.send_message(chat_id=GROUP_ID, text=full_report, parse_mode="Markdown")
         submitted_reports["finish"].add(user_id)
         bot.answer_callback_query(call.id, text="🚀 Отчет по закрытию отправлен!", show_alert=True)
-        bot.send_message(call.message.chat.id, "✨ Отчет успешно отправлен руководству! Выберите следующий чек-лист для заполнения:", reply_markup=get_stages_keyboard(user_id))
+        markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
+        markup.add(KeyboardButton("✅ Открыть смену"))
+        bot.send_message(
+            call.message.chat.id,
+            "✅ Вечерняя смена успешно закрыта. Все отчеты зарегистрированы!",
+            reply_markup=markup
+        )
         user_selections["finish"][user_id] = set()
     except Exception as e:
         bot.answer_callback_query(call.id, text="⚠️ Ошибка отправки.")
