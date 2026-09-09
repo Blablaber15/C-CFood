@@ -10,12 +10,7 @@ try:
     import config
     BOT_TOKEN = config.BOT_TOKEN
     GROUP_ID = config.GROUP_ID
-    admin_user_id = os.getenv("ADMIN_USER_ID")
-    ADMIN_USER_IDS = {
-        int(admin_user_id)
-        if admin_user_id
-        else config.ADMIN_USER_ID
-    } if admin_user_id or config.ADMIN_USER_ID else set()
+    ADMIN_USER_IDS = config.ADMIN_USER_IDS
 except ImportError:
     BOT_TOKEN = os.environ["BOT_TOKEN"]
     GROUP_ID = os.environ["GROUP_ID"]
@@ -187,7 +182,7 @@ def test_evening(message):
         reply_markup=get_stages_keyboard(user_id)
     )
 
-@bot.message_handler(commands=["godmode", "godemode"])
+@bot.message_handler(commands=["godmode"])
 def enable_godmode(message):
     if message.from_user.id not in ADMIN_USER_IDS:
         bot.send_message(message.chat.id, "⛔ Эта команда доступна только администратору.")
@@ -195,7 +190,7 @@ def enable_godmode(message):
     godmode_users.add(message.from_user.id)
     bot.send_message(message.chat.id, "🛠 Godmode включен. Теперь можно проверять любую смену в любом порядке.")
 
-@bot.message_handler(commands=["godmodeexit", "godemodeexit"])
+@bot.message_handler(commands=["godmodeexit"])
 def disable_godmode(message):
     if message.from_user.id not in ADMIN_USER_IDS:
         bot.send_message(message.chat.id, "⛔ Эта команда доступна только администратору.")
@@ -213,7 +208,7 @@ def handle_stage_selection(call):
     stage = call.data.split("_")[2]  # Получаем open, work, или finish
     user_id = call.from_user.id
     
-    if user_id in submitted_reports[stage] and user_id not in godmode_users:
+    if user_id in submitted_reports[stage]:
         bot.answer_callback_query(call.id, text="❌ Эта смена уже закрыта и отправлена!", show_alert=True)
         return
 
