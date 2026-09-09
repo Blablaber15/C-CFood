@@ -10,9 +10,15 @@ try:
     import config
     BOT_TOKEN = config.BOT_TOKEN
     GROUP_ID = config.GROUP_ID
+    ADMIN_USER_IDS = {config.ADMIN_USER_ID}
 except ImportError:
     BOT_TOKEN = os.environ["BOT_TOKEN"]
     GROUP_ID = os.environ["GROUP_ID"]
+    ADMIN_USER_IDS = {
+        int(user_id.strip())
+        for user_id in os.environ.get("ADMIN_USER_IDS", "").split(",")
+        if user_id.strip()
+    }
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # --- НАСТРОЙКА ОБЯЗАТЕЛЬНЫХ ФОТО ДЛЯ ПУНКТОВ ---
@@ -69,6 +75,14 @@ submitted_reports = {
     "open": set(),
     "work": set(),
     "finish": set()
+}
+
+godmode_users = set()
+
+STAGE_PREREQUISITES = {
+    "open": (),
+    "work": ("open",),
+    "finish": ("open", "work")
 }
 
 # Хранилище для текстовых данных и состояний сессии
@@ -153,6 +167,19 @@ def reset_reports(message):
     user_data.pop(user_id, None)
     bot.send_message(message.chat.id, "♻️ Ваши отчеты сброшены. Теперь можно начать с открытия смены.")
 
+@bot.message_handler(commands=["godmode"])
+def enable_godmode(message):
+    if message.from_user.id not in ADMIN_USER_IDS:
+        bot.send_message(message.chat.id, "⛔ Эта команда доступна только администратору.")
+        return
+    godmode_users.add(message.from_user.id)
+    bot.send_message(message.chat.id, "🛠 Godmode включен.")
+
+@bot.message_handler(commands=["godmodeexit"])
+def disable_godmode(message):
+    godmode_users.discard(message.from_user.id)
+    bot.send_message(message.chat.id, "🔒 Godmode выключен.")
+
 @bot.message_handler(func=lambda message: message.text == "✅ Открыть смену")
 def open_shift(message):
     user_id = message.from_user.id
@@ -163,8 +190,26 @@ def handle_stage_selection(call):
     stage = call.data.split("_")[2]  # Получаем open, work, или finish
     user_id = call.from_user.id
     
-    if user_id in submitted_reports[stage]:
+    if user_id in submitted_reports[stage] and user_id not in godmode_users:
         bot.answer_callback_query(call.id, text="❌ Эта смена уже закрыта и отправлена!", show_alert=True)
+        return
+
+    missing_stages = [] if user_id in godmode_users else [
+        required_stage
+        for required_stage in STAGE_PREREQUISITES[stage]
+        if user_id not in submitted_reports[required_stage]
+    ]
+    if missing_stages:
+        stage_names = {
+            "open": "открытие смены",
+            "work": "отчет в середине дня"
+        }
+        missing_text = " и ".join(stage_names[item] for item in missing_stages)
+        bot.answer_callback_query(
+            call.id,
+            text=f"Сначала завершите: {missing_text}.",
+            show_alert=True
+        )
         return
 
     bot.answer_callback_query(call.id)
