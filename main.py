@@ -71,10 +71,8 @@ submitted_reports = {
     "finish": set()
 }
 
-# Пользователи, которым разрешено тестировать этапы в любом порядке.
 godmode_users = set()
 
-# Следующий отчет можно открыть только после завершения предыдущих этапов.
 STAGE_PREREQUISITES = {
     "open": (),
     "work": ("open",),
@@ -148,7 +146,7 @@ def get_stages_keyboard(user_id):
 def start(message):
     bot.clear_step_handler_by_chat_id(message.chat.id)
     
-    markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
     button = KeyboardButton("✅ Открыть смену")
     markup.add(button)
     bot.send_message(message.chat.id, "✅ Добрый день! Чтобы начать, нажмите кнопку ниже ⬇️", reply_markup=markup)
@@ -178,18 +176,12 @@ def test_evening(message):
 @bot.message_handler(commands=["godmode"])
 def enable_godmode(message):
     godmode_users.add(message.from_user.id)
-    bot.send_message(
-        message.chat.id,
-        "🛠 Godmode включен. Теперь можно проверять любую смену в любом порядке."
-    )
+    bot.send_message(message.chat.id, "🛠 Godmode включен. Теперь можно проверять любую смену в любом порядке.")
 
 @bot.message_handler(commands=["godmodeexit"])
 def disable_godmode(message):
     godmode_users.discard(message.from_user.id)
-    bot.send_message(
-        message.chat.id,
-        "🔒 Godmode выключен. Проверка порядка смен снова включена."
-    )
+    bot.send_message(message.chat.id, "🔒 Godmode выключен. Проверка порядка смен снова включена.")
 
 @bot.message_handler(func=lambda message: message.text == "✅ Открыть смену")
 def open_shift(message):
