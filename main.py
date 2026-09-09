@@ -187,7 +187,7 @@ def test_evening(message):
         reply_markup=get_stages_keyboard(user_id)
     )
 
-@bot.message_handler(commands=["godmode"])
+@bot.message_handler(commands=["godmode", "godemode"])
 def enable_godmode(message):
     if message.from_user.id not in ADMIN_USER_IDS:
         bot.send_message(message.chat.id, "⛔ Эта команда доступна только администратору.")
@@ -195,7 +195,7 @@ def enable_godmode(message):
     godmode_users.add(message.from_user.id)
     bot.send_message(message.chat.id, "🛠 Godmode включен. Теперь можно проверять любую смену в любом порядке.")
 
-@bot.message_handler(commands=["godmodeexit"])
+@bot.message_handler(commands=["godmodeexit", "godemodeexit"])
 def disable_godmode(message):
     if message.from_user.id not in ADMIN_USER_IDS:
         bot.send_message(message.chat.id, "⛔ Эта команда доступна только администратору.")
@@ -213,7 +213,7 @@ def handle_stage_selection(call):
     stage = call.data.split("_")[2]  # Получаем open, work, или finish
     user_id = call.from_user.id
     
-    if user_id in submitted_reports[stage]:
+    if user_id in submitted_reports[stage] and user_id not in godmode_users:
         bot.answer_callback_query(call.id, text="❌ Эта смена уже закрыта и отправлена!", show_alert=True)
         return
 
