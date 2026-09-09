@@ -10,9 +10,15 @@ try:
     import config
     BOT_TOKEN = config.BOT_TOKEN
     GROUP_ID = config.GROUP_ID
+    ADMIN_USER_IDS = config.ADMIN_USER_IDS
 except ImportError:
     BOT_TOKEN = os.environ["BOT_TOKEN"]
     GROUP_ID = os.environ["GROUP_ID"]
+    ADMIN_USER_IDS = {
+        int(user_id.strip())
+        for user_id in os.environ.get("ADMIN_USER_IDS", "").split(",")
+        if user_id.strip()
+    }
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # --- НАСТРОЙКА ОБЯЗАТЕЛЬНЫХ ФОТО ДЛЯ ПУНКТОВ ---
@@ -163,6 +169,9 @@ def reset_reports(message):
 
 @bot.message_handler(commands=["test_evening"])
 def test_evening(message):
+    if message.from_user.id not in ADMIN_USER_IDS:
+        bot.send_message(message.chat.id, "⛔ Эта команда доступна только администратору.")
+        return
     user_id = message.from_user.id
     submitted_reports["open"].add(user_id)
     submitted_reports["work"].add(user_id)
@@ -175,11 +184,17 @@ def test_evening(message):
 
 @bot.message_handler(commands=["godmode"])
 def enable_godmode(message):
+    if message.from_user.id not in ADMIN_USER_IDS:
+        bot.send_message(message.chat.id, "⛔ Эта команда доступна только администратору.")
+        return
     godmode_users.add(message.from_user.id)
     bot.send_message(message.chat.id, "🛠 Godmode включен. Теперь можно проверять любую смену в любом порядке.")
 
 @bot.message_handler(commands=["godmodeexit"])
 def disable_godmode(message):
+    if message.from_user.id not in ADMIN_USER_IDS:
+        bot.send_message(message.chat.id, "⛔ Эта команда доступна только администратору.")
+        return
     godmode_users.discard(message.from_user.id)
     bot.send_message(message.chat.id, "🔒 Godmode выключен. Проверка порядка смен снова включена.")
 
