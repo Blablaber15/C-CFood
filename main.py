@@ -183,6 +183,18 @@ def disable_godmode(message):
 @bot.message_handler(func=lambda message: message.text == "✅ Открыть смену")
 def open_shift(message):
     user_id = message.from_user.id
+    
+    # Проверяем, все ли смены закрыты
+    all_closed = all(user_id in submitted_reports[stage] for stage in submitted_reports)
+    
+    if all_closed:
+        # Сбрасываем все статусы для новых смен
+        for stage in submitted_reports:
+            submitted_reports[stage].discard(user_id)
+            user_selections[stage].pop(user_id, None)
+        user_inputs.pop(user_id, None)
+        user_data.pop(user_id, None)
+    
     bot.send_message(message.chat.id, "Выберите чек-лист, который хотите заполнить:", reply_markup=get_stages_keyboard(user_id))
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("start_stage_"))
@@ -234,6 +246,12 @@ def process_date_step(message):
         msg = bot.send_message(message.chat.id, "❌ **Неверный формат даты!** Пожалуйста, введите дату строго в формате **ДД.ММ.ГГГГ**:", parse_mode="Markdown")
         bot.register_next_step_handler(msg, process_date_step)
         return
+    
+    # Сбрасываем все статусы при вводе даты (для новых смен)
+    for stage in submitted_reports:
+        submitted_reports[stage].discard(user_id)
+        user_selections[stage].pop(user_id, None)
+    user_inputs.pop(user_id, None)
     
     user_data[user_id] = {"date": message.text}
     msg = bot.send_message(message.chat.id, "🔢 **Шаг 2/3:** Введите название или номер смены (например: 1, Вечер, Смена А):", parse_mode="Markdown")
