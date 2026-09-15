@@ -1,6 +1,11 @@
 import telebot
 import os
 import re
+import json
+import threading
+import msvcrt
+from contextlib import contextmanager
+from datetime import date, datetime
 from telebot import types
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -77,6 +82,9 @@ submitted_reports = {
     "finish": set()
 }
 
+# Защита от повторной отправки одного callback при двойном нажатии.
+processing_reports = set()
+
 godmode_users = set()
 
 STAGE_PREREQUISITES = {
@@ -88,6 +96,110 @@ STAGE_PREREQUISITES = {
 # Хранилище для текстовых данных и состояний сессии
 user_inputs = {}
 user_data = {}
+state_file = os.path.join(os.path.dirname(__file__), "bot_state.json")
+state_lock = threading.Lock()
+lock_file = f"{state_file}.lock"
+
+@contextmanager
+def state_file_lock():
+    lock_handle = open(lock_file, "w", encoding="utf-8")
+    try:
+        msvcrt.locking(lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
+        yield
+    finally:
+        msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+        lock_handle.close()
+
+def save_state():
+    state = {
+        "submitted_reports": {
+            stage: list(user_ids)
+            for stage, user_ids in submitted_reports.items()
+        },
+        "user_selections": {
+            stage: {
+                str(user_id): list(selected)
+                for user_id, selected in selections.items()
+            }
+            for stage, selections in user_selections.items()
+        },
+        "user_inputs": user_inputs,
+        "user_data": {str(user_id): data for user_id, data in user_data.items()},
+    }
+    temporary_file = f"{state_file}.tmp"
+    try:
+        with state_lock:
+            with state_file_lock():
+                with open(temporary_file, "w", encoding="utf-8") as file:
+                    json.dump(state, file, ensure_ascii=False)
+                os.replace(temporary_file, state_file)
+    except (OSError, TypeError) as error:
+        print(f"Ошибка сохранения состояния: {error}")
+
+def load_state():
+    try:
+        with state_lock:
+            with state_file_lock():
+                with open(state_file, "r", encoding="utf-8") as file:
+                    state = json.load(file)
+    except FileNotFoundError:
+        return
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"Ошибка загрузки состояния: {error}")
+        return
+
+    for stage, user_ids in state.get("submitted_reports", {}).items():
+        if stage in submitted_reports:
+            submitted_reports[stage].update(int(user_id) for user_id in user_ids)
+    for stage, selections in state.get("user_selections", {}).items():
+        if stage in user_selections:
+            user_selections[stage].update(
+                {int(user_id): set(selected) for user_id, selected in selections.items()}
+            )
+    user_inputs.update({int(user_id): data for user_id, data in state.get("user_inputs", {}).items()})
+    user_data.update({int(user_id): data for user_id, data in state.get("user_data", {}).items()})
+
+load_state()
+
+def get_current_day():
+    return date.today().isoformat()
+
+def reset_user_session(user_id):
+    for stage in submitted_reports:
+        submitted_reports[stage].discard(user_id)
+        user_selections[stage].pop(user_id, None)
+    processing_reports.difference_update(
+        report_key for report_key in processing_reports if report_key[0] == user_id
+    )
+    user_inputs.pop(user_id, None)
+    if user_id in user_data:
+        user_data[user_id].pop("current_stage", None)
+    user_data[user_id] = {"_session_day": get_current_day()}
+    save_state()
+
+def reset_user_stage(user_id, stage):
+    submitted_reports[stage].discard(user_id)
+    user_selections[stage].pop(user_id, None)
+    processing_reports.discard((user_id, stage))
+    if user_id in user_data:
+        if user_data[user_id].get("current_stage") == stage:
+            user_data[user_id].pop("current_stage", None)
+    if stage == "finish" and user_id in user_inputs:
+        user_inputs[user_id].pop("meat_consumption", None)
+    save_state()
+
+def ensure_current_day(user_id):
+    current_day = get_current_day()
+    if user_data.get(user_id, {}).get("_session_day") == current_day:
+        return
+
+    reset_user_session(user_id)
+
+def has_active_session(user_id):
+    return all(
+        user_data.get(user_id, {}).get(field)
+        for field in ("name", "date", "shift")
+    )
 
 OPTIONS_open = {
     "menu": "Актуальность меню проверена",
@@ -136,6 +248,7 @@ def get_user_info_text(user_id, stage_title):
     return f"📌 **{stage_title}**\n\n👤 **Сотрудник:** {name}\n📅 **Дата:** {date}\n🔢 **Смена:** {shift}"
 
 def get_stages_keyboard(user_id):
+    ensure_current_day(user_id)
     markup = InlineKeyboardMarkup()
     open_text = "🌅 Открытие смены (СДАНО)" if user_id in submitted_reports["open"] else "🌅 Открытие смены"
     work_text = "☀️ Отчет в середине дня (СДАНО)" if user_id in submitted_reports["work"] else "☀️ Отчет в середине дня"
@@ -160,12 +273,42 @@ def start(message):
 @bot.message_handler(commands=["reset_reports"])
 def reset_reports(message):
     user_id = message.from_user.id
-    for stage in submitted_reports:
-        submitted_reports[stage].discard(user_id)
-        user_selections[stage].pop(user_id, None)
-    user_inputs.pop(user_id, None)
-    user_data.pop(user_id, None)
+    reset_user_session(user_id)
     bot.send_message(message.chat.id, "♻️ Ваши отчеты сброшены. Теперь можно начать с открытия смены.")
+
+@bot.message_handler(commands=["reset_shift"])
+def reset_shift(message):
+    user_id = message.from_user.id
+    stage_aliases = {
+        "open": "open",
+        "утро": "open",
+        "утренняя": "open",
+        "work": "work",
+        "день": "work",
+        "дневная": "work",
+        "finish": "finish",
+        "вечер": "finish",
+        "вечерняя": "finish",
+        "закрытие": "finish",
+    }
+    command_parts = message.text.split(maxsplit=1)
+    stage_name = command_parts[1].strip().lower() if len(command_parts) > 1 else ""
+    stage = stage_aliases.get(stage_name)
+    if not stage:
+        bot.send_message(
+            message.chat.id,
+            "Укажите этап для сброса: /reset_shift open, /reset_shift work или /reset_shift finish.\n"
+            "Для дневного отчета: /reset_shift work"
+        )
+        return
+
+    reset_user_stage(user_id, stage)
+    stage_titles = {
+        "open": "утренний отчет",
+        "work": "дневной отчет",
+        "finish": "вечерний отчет",
+    }
+    bot.send_message(message.chat.id, f"♻️ Сброшен только {stage_titles[stage]}. Остальные этапы сохранены.")
 
 @bot.message_handler(commands=["godmode"])
 def enable_godmode(message):
@@ -183,24 +326,14 @@ def disable_godmode(message):
 @bot.message_handler(func=lambda message: message.text == "✅ Открыть смену")
 def open_shift(message):
     user_id = message.from_user.id
-    
-    # Проверяем, все ли смены закрыты
-    all_closed = all(user_id in submitted_reports[stage] for stage in submitted_reports)
-    
-    if all_closed:
-        # Сбрасываем все статусы для новых смен
-        for stage in submitted_reports:
-            submitted_reports[stage].discard(user_id)
-            user_selections[stage].pop(user_id, None)
-        user_inputs.pop(user_id, None)
-        user_data.pop(user_id, None)
-    
+    ensure_current_day(user_id)
     bot.send_message(message.chat.id, "Выберите чек-лист, который хотите заполнить:", reply_markup=get_stages_keyboard(user_id))
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("start_stage_"))
 def handle_stage_selection(call):
     stage = call.data.split("_")[2]  # Получаем open, work, или finish
     user_id = call.from_user.id
+    ensure_current_day(user_id)
     
     if user_id in submitted_reports[stage] and user_id not in godmode_users:
         bot.answer_callback_query(call.id, text="❌ Эта смена уже закрыта и отправлена!", show_alert=True)
@@ -224,11 +357,19 @@ def handle_stage_selection(call):
         )
         return
 
+    if user_id in user_data and not has_active_session(user_id):
+        bot.answer_callback_query(call.id, text="Сессия устарела. Откройте новую смену.", show_alert=True)
+        return
+
     bot.answer_callback_query(call.id)
     
     if user_id not in user_inputs:
         user_inputs[user_id] = {}
     user_inputs[user_id]["target_stage"] = stage
+    if user_id not in user_data:
+        user_data[user_id] = {}
+    user_data[user_id]["current_stage"] = stage
+    save_state()
     
     if user_id in user_data and "name" in user_data[user_id] and "date" in user_data[user_id]:
         launch_checklist_instantly(call.message.chat.id, user_id, stage)
@@ -236,28 +377,33 @@ def handle_stage_selection(call):
         msg = bot.send_message(call.message.chat.id, "📅 **Шаг 1/3:** Введите дату в формате **ДД.ММ.ГГГГ** (например, 07.09.2026):", parse_mode="Markdown")
         bot.register_next_step_handler(msg, process_date_step)
 def process_date_step(message):
+    if message.text and message.text.startswith("/reset_shift"):
+        reset_shift(message)
+        return
     if message.text == "/start":
         start(message)
         return
         
     user_id = message.from_user.id
     date_pattern = r"^\d{2}\.\d{2}\.\d{4}$"
-    if not message.text or not re.match(date_pattern, message.text):
+    try:
+        entered_date = datetime.strptime(message.text, "%d.%m.%Y")
+    except (TypeError, ValueError):
+        entered_date = None
+    if not entered_date or not re.match(date_pattern, message.text):
         msg = bot.send_message(message.chat.id, "❌ **Неверный формат даты!** Пожалуйста, введите дату строго в формате **ДД.ММ.ГГГГ**:", parse_mode="Markdown")
         bot.register_next_step_handler(msg, process_date_step)
         return
     
-    # Сбрасываем все статусы при вводе даты (для новых смен)
-    for stage in submitted_reports:
-        submitted_reports[stage].discard(user_id)
-        user_selections[stage].pop(user_id, None)
-    user_inputs.pop(user_id, None)
-    
-    user_data[user_id] = {"date": message.text}
+    user_data[user_id] = {"date": message.text, "_session_day": get_current_day()}
+    save_state()
     msg = bot.send_message(message.chat.id, "🔢 **Шаг 2/3:** Введите название или номер смены (например: 1, Вечер, Смена А):", parse_mode="Markdown")
     bot.register_next_step_handler(msg, process_shift_step)
 
 def process_shift_step(message):
+    if message.text and message.text.startswith("/reset_shift"):
+        reset_shift(message)
+        return
     if message.text == "/start":
         start(message)
         return
@@ -269,10 +415,14 @@ def process_shift_step(message):
         return
     if user_id in user_data:
         user_data[user_id]["shift"] = message.text
+        save_state()
     msg = bot.send_message(message.chat.id, "👤 **Шаг 3/3:** Введите **Имя и Фамилию** сотрудника (текст):", parse_mode="Markdown")
     bot.register_next_step_handler(msg, process_name_step)
 
 def process_name_step(message):
+    if message.text and message.text.startswith("/reset_shift"):
+        reset_shift(message)
+        return
     if message.text == "/start":
         start(message)
         return
@@ -285,11 +435,17 @@ def process_name_step(message):
         
     if user_id in user_data:
         user_data[user_id]["name"] = message.text
+        save_state()
 
-    stage = user_inputs.get(user_id, {}).get("target_stage", "open")
+    stage = user_inputs.get(user_id, {}).get("target_stage", user_data.get(user_id, {}).get("current_stage", "open"))
+    if user_id in user_data:
+        user_data[user_id]["current_stage"] = stage
+    save_state()
     launch_checklist_instantly(message.chat.id, user_id, stage)
 
 def launch_checklist_instantly(chat_id, user_id, stage):
+    if user_id in user_data:
+        user_data[user_id]["current_stage"] = stage
     if stage == "open":
         reply_markup = get_checkbox_keyboard(user_id, "open", OPTIONS_open, "toggle_open:", "finish_open")
         title = "Открытие смены"
@@ -331,6 +487,10 @@ def get_checkbox_keyboard(user_id, stage, options, toggle_prefix, finish_callbac
 @bot.callback_query_handler(func=lambda call: call.data.startswith("toggle_open:"))
 def process_checkbox_open(call):
     user_id = call.from_user.id
+    ensure_current_day(user_id)
+    if user_id in user_data and not has_active_session(user_id):
+        bot.answer_callback_query(call.id, text="Сессия устарела. Откройте новую смену.", show_alert=True)
+        return
     item_id = call.data.split(":")[1]
     if user_id not in user_selections["open"]:
         user_selections["open"][user_id] = set()
@@ -356,6 +516,10 @@ def process_checkbox_open(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("toggle_work:"))
 def process_checkbox_work(call):
     user_id = call.from_user.id
+    ensure_current_day(user_id)
+    if user_id in user_data and not has_active_session(user_id):
+        bot.answer_callback_query(call.id, text="Сессия устарела. Откройте новую смену.", show_alert=True)
+        return
     item_id = call.data.split(":")[1]
     if user_id not in user_selections["work"]:
         user_selections["work"][user_id] = set()
@@ -381,6 +545,10 @@ def process_checkbox_work(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("toggle_finish:"))
 def process_checkbox_finish(call):
     user_id = call.from_user.id
+    ensure_current_day(user_id)
+    if user_id in user_data and not has_active_session(user_id):
+        bot.answer_callback_query(call.id, text="Сессия устарела. Откройте новую смену.", show_alert=True)
+        return
     item_id = call.data.split(":")[1]
     if user_id not in user_selections["finish"]:
         user_selections["finish"][user_id] = set()
@@ -416,6 +584,9 @@ def process_checkbox_finish(call):
 
 # --- ВВОД ТЕКСТА ДЛЯ РАСХОДА МЯСА ---
 def save_meat_input(message, menu_message_id):
+    if message.text and message.text.startswith("/reset_shift"):
+        reset_shift(message)
+        return
     if message.text == "/start":
         start(message)
         return
@@ -433,6 +604,7 @@ def save_meat_input(message, menu_message_id):
     if user_id not in user_selections["finish"]:
         user_selections["finish"][user_id] = set()
     user_selections["finish"][user_id].add("meat_consumption")
+    save_state()
     
     bot.send_message(message.chat.id, "✅ Данные по расходу мяса успешно записаны!")
     
@@ -441,6 +613,9 @@ def save_meat_input(message, menu_message_id):
 
 # --- ИСПРАВЛЕННЫЙ ОБРАБОТЧИК ФОТО-ПОДТВЕРЖДЕНИЙ ---
 def save_photo_and_toggle(message, stage, item_id, options, toggle_prefix, finish_callback, menu_message_id):
+    if message.text and message.text.startswith("/reset_shift"):
+        reset_shift(message)
+        return
     if message.text == "/start":
         start(message)
         return
@@ -460,10 +635,13 @@ def save_photo_and_toggle(message, stage, item_id, options, toggle_prefix, finis
         bot.send_photo(chat_id=GROUP_ID, photo=photo_id, caption=caption_text, parse_mode="Markdown")
     except Exception as e:
         print(f"Ошибка отправки фото: {e}")
+        bot.send_message(message.chat.id, "⚠️ Не удалось отправить фото руководству. Пункт не отмечен, попробуйте еще раз.")
+        return
         
     if user_id not in user_selections[stage]:
         user_selections[stage][user_id] = set()
     user_selections[stage][user_id].add(item_id)
+    save_state()
     
     bot.send_message(message.chat.id, f"✅ Фото для пункта «{options[item_id]}» принято!")
     
@@ -474,6 +652,15 @@ def save_photo_and_toggle(message, stage, item_id, options, toggle_prefix, finis
 @bot.callback_query_handler(func=lambda call: call.data == "finish_open")
 def finish_open_report(call):
     user_id = call.from_user.id
+    ensure_current_day(user_id)
+    if user_id in user_data and not has_active_session(user_id):
+        bot.answer_callback_query(call.id, text="Сессия устарела. Откройте новую смену.", show_alert=True)
+        return
+    report_key = (user_id, "open")
+    if user_id in submitted_reports["open"] or report_key in processing_reports:
+        bot.answer_callback_query(call.id, text="Этот отчет уже отправляется или был отправлен.")
+        return
+    processing_reports.add(report_key)
     selected = user_selections["open"].get(user_id, set())
     info_text = get_user_info_text(user_id, "Отчет по открытию смены")
     report_lines = [f"{'✅' if i in selected else '❌'} {l}" for i, l in OPTIONS_open.items()]
@@ -484,12 +671,24 @@ def finish_open_report(call):
         bot.answer_callback_query(call.id, text="🚀 Отчет по открытию смены отправлен!", show_alert=True)
         bot.send_message(call.message.chat.id, "✨ Отчет успешно отправлен руководству! Выберите следующий чек-лист для заполнения:", reply_markup=get_stages_keyboard(user_id))
         user_selections["open"][user_id] = set()
+        processing_reports.discard(report_key)
+        save_state()
     except Exception as e:
+        processing_reports.discard(report_key)
         bot.answer_callback_query(call.id, text="⚠️ Ошибка отправки в группу.")
 
 @bot.callback_query_handler(func=lambda call: call.data == "finish_work")
 def finish_work_report(call):
     user_id = call.from_user.id
+    ensure_current_day(user_id)
+    if user_id in user_data and not has_active_session(user_id):
+        bot.answer_callback_query(call.id, text="Сессия устарела. Откройте новую смену.", show_alert=True)
+        return
+    report_key = (user_id, "work")
+    if user_id in submitted_reports["work"] or report_key in processing_reports:
+        bot.answer_callback_query(call.id, text="Этот отчет уже отправляется или был отправлен.")
+        return
+    processing_reports.add(report_key)
     selected = user_selections["work"].get(user_id, set())
     info_text = get_user_info_text(user_id, "Отчет за середину дня")
     report_lines = [f"{'✅' if i in selected else '❌'} {l}" for i, l in OPTIONS_work.items()]
@@ -500,12 +699,24 @@ def finish_work_report(call):
         bot.answer_callback_query(call.id, text="🚀 Дневной отчет успешно отправлен!", show_alert=True)
         bot.send_message(call.message.chat.id, "✨ Отчет успешно отправлен руководству! Выберите следующий чек-лист для заполнения:", reply_markup=get_stages_keyboard(user_id))
         user_selections["work"][user_id] = set()
+        processing_reports.discard(report_key)
+        save_state()
     except Exception as e:
+        processing_reports.discard(report_key)
         bot.answer_callback_query(call.id, text="⚠️ Ошибка отправки.")
 
 @bot.callback_query_handler(func=lambda call: call.data == "finish_finish")
 def finish_final_report(call):
     user_id = call.from_user.id
+    ensure_current_day(user_id)
+    if user_id in user_data and not has_active_session(user_id):
+        bot.answer_callback_query(call.id, text="Сессия устарела. Откройте новую смену.", show_alert=True)
+        return
+    report_key = (user_id, "finish")
+    if user_id in submitted_reports["finish"] or report_key in processing_reports:
+        bot.answer_callback_query(call.id, text="Этот отчет уже отправляется или был отправлен.")
+        return
+    processing_reports.add(report_key)
     selected = user_selections["finish"].get(user_id, set())
     info_text = get_user_info_text(user_id, "Отчет по закрытию смены")
     report_lines = []
@@ -527,11 +738,14 @@ def finish_final_report(call):
             "✅ Вечерняя смена успешно закрыта. Все отчеты зарегистрированы!",
             reply_markup=markup
         )
-        user_selections["finish"][user_id] = set()
+        reset_user_session(user_id)
+        processing_reports.discard(report_key)
     except Exception as e:
+        processing_reports.discard(report_key)
         bot.answer_callback_query(call.id, text="⚠️ Ошибка отправки.")
 
 def update_keyboard_safe(call, user_id, stage, options, toggle_prefix, finish_callback):
+    save_state()
     try:
         bot.edit_message_reply_markup(
             chat_id=call.message.chat.id, 
