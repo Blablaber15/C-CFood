@@ -368,9 +368,9 @@ def handle_stage_selection(call):
         )
         return
 
-    if user_id in user_data and not has_active_session(user_id):
-        bot.answer_callback_query(call.id, text="Сессия устарела. Откройте новую смену.", show_alert=True)
-        return
+    # if user_id in user_data and not has_active_session(user_id):
+    #     bot.answer_callback_query(call.id, text="Сессия устарела. Откройте новую смену.", show_alert=True)
+    #     return
 
     bot.answer_callback_query(call.id)
     
@@ -499,9 +499,9 @@ def get_checkbox_keyboard(user_id, stage, options, toggle_prefix, finish_callbac
 def process_checkbox_open(call):
     user_id = call.from_user.id
     ensure_current_day(user_id)
-    if user_id in user_data and not has_active_session(user_id):
-        bot.answer_callback_query(call.id, text="Сессия устарела. Откройте новую смену.", show_alert=True)
-        return
+    # if user_id in user_data and not has_active_session(user_id):
+    #     bot.answer_callback_query(call.id, text="Сессия устарела. Откройте новую смену.", show_alert=True)
+    #     return
     item_id = call.data.split(":")[1]
     if user_id not in user_selections["open"]:
         user_selections["open"][user_id] = set()
@@ -528,9 +528,9 @@ def process_checkbox_open(call):
 def process_checkbox_work(call):
     user_id = call.from_user.id
     ensure_current_day(user_id)
-    if user_id in user_data and not has_active_session(user_id):
-        bot.answer_callback_query(call.id, text="Сессия устарела. Откройте новую смену.", show_alert=True)
-        return
+    # if user_id in user_data and not has_active_session(user_id):
+    #     bot.answer_callback_query(call.id, text="Сессия устарела. Откройте новую смену.", show_alert=True)
+    #     return
     item_id = call.data.split(":")[1]
     if user_id not in user_selections["work"]:
         user_selections["work"][user_id] = set()
@@ -557,9 +557,9 @@ def process_checkbox_work(call):
 def process_checkbox_finish(call):
     user_id = call.from_user.id
     ensure_current_day(user_id)
-    if user_id in user_data and not has_active_session(user_id):
-        bot.answer_callback_query(call.id, text="Сессия устарела. Откройте новую смену.", show_alert=True)
-        return
+    # if user_id in user_data and not has_active_session(user_id):
+    #     bot.answer_callback_query(call.id, text="Сессия устарела. Откройте новую смену.", show_alert=True)
+    #     return
     item_id = call.data.split(":")[1]
     if user_id not in user_selections["finish"]:
         user_selections["finish"][user_id] = set()
@@ -664,9 +664,9 @@ def save_photo_and_toggle(message, stage, item_id, options, toggle_prefix, finis
 def finish_open_report(call):
     user_id = call.from_user.id
     ensure_current_day(user_id)
-    if user_id in user_data and not has_active_session(user_id):
-        bot.answer_callback_query(call.id, text="Сессия устарела. Откройте новую смену.", show_alert=True)
-        return
+    # if user_id in user_data and not has_active_session(user_id):
+    #     bot.answer_callback_query(call.id, text="Сессия устарела. Откройте новую смену.", show_alert=True)
+    #     return
     report_key = (user_id, "open")
     if user_id in submitted_reports["open"] or report_key in processing_reports:
         bot.answer_callback_query(call.id, text="Этот отчет уже отправляется или был отправлен.")
@@ -692,9 +692,9 @@ def finish_open_report(call):
 def finish_work_report(call):
     user_id = call.from_user.id
     ensure_current_day(user_id)
-    if user_id in user_data and not has_active_session(user_id):
-        bot.answer_callback_query(call.id, text="Сессия устарела. Откройте новую смену.", show_alert=True)
-        return
+    # if user_id in user_data and not has_active_session(user_id):
+    #     bot.answer_callback_query(call.id, text="Сессия устарела. Откройте новую смену.", show_alert=True)
+    #     return
     report_key = (user_id, "work")
     if user_id in submitted_reports["work"] or report_key in processing_reports:
         bot.answer_callback_query(call.id, text="Этот отчет уже отправляется или был отправлен.")
@@ -720,9 +720,9 @@ def finish_work_report(call):
 def finish_final_report(call):
     user_id = call.from_user.id
     ensure_current_day(user_id)
-    if user_id in user_data and not has_active_session(user_id):
-        bot.answer_callback_query(call.id, text="Сессия устарела. Откройте новую смену.", show_alert=True)
-        return
+    # if user_id in user_data and not has_active_session(user_id):
+    #     bot.answer_callback_query(call.id, text="Сессия устарела. Откройте новую смену.", show_alert=True)
+    #     return
     report_key = (user_id, "finish")
     if user_id in submitted_reports["finish"] or report_key in processing_reports:
         bot.answer_callback_query(call.id, text="Этот отчет уже отправляется или был отправлен.")
