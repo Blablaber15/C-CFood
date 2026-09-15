@@ -346,9 +346,9 @@ def handle_stage_selection(call):
     user_id = call.from_user.id
     ensure_current_day(user_id)
     
-    if user_id in submitted_reports[stage] and user_id not in godmode_users:
-        bot.answer_callback_query(call.id, text="❌ Эта смена уже закрыта и отправлена!", show_alert=True)
-        return
+    # if user_id in submitted_reports[stage] and user_id not in godmode_users:
+    #     bot.answer_callback_query(call.id, text="❌ Эта смена уже закрыта и отправлена!", show_alert=True)
+    #     return
 
     missing_stages = [] if user_id in godmode_users else [
         required_stage
