@@ -3,13 +3,18 @@ import os
 import re
 import json
 import threading
-import msvcrt
+import sys 
 from contextlib import contextmanager
 from datetime import date, datetime
 from telebot import types
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from telebot.apihelper import ApiTelegramException
+
+if sys.platform == "win32": 
+    import msvcrt 
+else: 
+    import fcntl
 
 try:
     import config
@@ -104,10 +109,16 @@ lock_file = f"{state_file}.lock"
 def state_file_lock():
     lock_handle = open(lock_file, "w", encoding="utf-8")
     try:
-        msvcrt.locking(lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
+        if sys.platform == "win32":
+            msvcrt.locking(lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         yield
     finally:
-        msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+        if sys.platform == "win32":
+            msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
         lock_handle.close()
 
 def save_state():
