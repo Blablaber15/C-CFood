@@ -258,6 +258,12 @@ def get_user_info_text(user_id, stage_title):
     shift = info.get("shift", "Не указана")
     return f"📌 **{stage_title}**\n\n👤 **Сотрудник:** {name}\n📅 **Дата:** {date}\n🔢 **Смена:** {shift}"
 
+def get_selected_for_stage(user_id, stage):
+    selected = set(user_selections.get(stage, {}).get(user_id, set()))
+    if stage == "finish" and user_id in user_inputs and "meat_consumption" in user_inputs[user_id]:
+        selected.add("meat_consumption")
+    return selected
+
 def get_stages_keyboard(user_id):
     ensure_current_day(user_id)
     markup = InlineKeyboardMarkup()
@@ -475,7 +481,7 @@ def launch_checklist_instantly(chat_id, user_id, stage):
     )
 
 def get_checkbox_keyboard(user_id, stage, options, toggle_prefix, finish_callback):
-    selected = user_selections[stage].get(user_id, set())
+    selected = get_selected_for_stage(user_id, stage)
     markup = InlineKeyboardMarkup()
     for item_id, label in options.items():
         status_emoji = "✅" if item_id in selected else "⬜️"
@@ -728,7 +734,7 @@ def finish_final_report(call):
         bot.answer_callback_query(call.id, text="Этот отчет уже отправляется или был отправлен.")
         return
     processing_reports.add(report_key)
-    selected = user_selections["finish"].get(user_id, set())
+    selected = get_selected_for_stage(user_id, "finish")
     info_text = get_user_info_text(user_id, "Отчет по закрытию смены")
     report_lines = []
     for item_id, label in OPTIONS_finish.items():
